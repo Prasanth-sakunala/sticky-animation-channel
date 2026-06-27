@@ -7,18 +7,14 @@ interface ObjectLayerProps {
   durationInFrames: number;
   mood?: string;
   sceneType?: string;
+  narrationText?: string;
+  background?: string;
+  characterPlacement?: { x: number; y: number; scale: number };
   /** Audio-synced frames when objects should appear (from audio-sync) */
   objectFrames?: number[];
 }
 
-// Positions for object placement (percentages) — avoid center where character sits
-const OBJECT_POSITIONS = [
-  { x: 8, y: 65, rotate: -5 },
-  { x: 85, y: 60, rotate: 4 },
-  { x: 6, y: 35, rotate: -3 },
-  { x: 88, y: 32, rotate: 6 },
-  { x: 12, y: 78, rotate: -7 },
-];
+type Placement = { x: number; y: number; rotate: number; size: number };
 
 const EVIDENCE_POSITIONS = [
   { x: 42, y: 44, rotate: -4, size: 280 },
@@ -31,6 +27,108 @@ const CASE_BOARD_POSITIONS = [
   { x: 52, y: 39, rotate: 3, size: 150 },
   { x: 70, y: 35, rotate: 8, size: 160 },
 ];
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
+function classifyObjectKind(objectName: string): 'vehicle' | 'weapon' | 'document' | 'handheld' | 'furniture' | 'misc' {
+  const name = objectName.toLowerCase();
+  if (name.includes('car') || name.includes('truck') || name.includes('ambulance')) return 'vehicle';
+  if (name.includes('knife') || name.includes('gun') || name.includes('axe') || name.includes('crowbar') || name.includes('rope')) return 'weapon';
+  if (name.includes('newspaper') || name.includes('photo') || name.includes('diary') || name.includes('envelope') || name.includes('letter')) return 'document';
+  if (name.includes('phone') || name.includes('flashlight') || name.includes('key') || name.includes('ring') || name.includes('box') || name.includes('suitcase')) return 'handheld';
+  if (name.includes('chair') || name.includes('lamp') || name.includes('mirror')) return 'furniture';
+  return 'misc';
+}
+
+function sideX(index: number, leftX: number, rightX: number): number {
+  return index % 2 === 0 ? leftX : rightX;
+}
+
+function isRoadLike(text: string, bg: string): boolean {
+  return /highway|street|road|alley|bridge/.test(bg) || /\b(road|street|path|trail|bridge)\b/.test(text);
+}
+
+function isMountainLike(text: string, bg: string): boolean {
+  return /mountain|cliff|hill/.test(bg) || /\b(mountain|cliff|hill)\b/.test(text);
+}
+
+function isIndoor(bg: string): boolean {
+  return /office|room|kitchen|hallway|hospital|court|station|warehouse|prison/.test(bg);
+}
+
+function placementForVehicle(index: number, roadLike: boolean, mountainLike: boolean): Placement {
+  const x = roadLike ? sideX(index, 24, 76) : sideX(index, 18, 82);
+  return {
+    x,
+    y: mountainLike ? 74 : 72,
+    rotate: sideX(index, -2, 2),
+    size: roadLike ? 250 : 220,
+  };
+}
+
+function placementNearCharacter(index: number, characterX: number, characterY: number, spread: number, size: number): Placement {
+  const side = index % 2 === 0 ? -1 : 1;
+  return {
+    x: clamp(characterX + side * spread, 16, 84),
+    y: clamp(characterY - 6 + index * 2, 40, 78),
+    rotate: sideX(index, -8, 8),
+    size,
+  };
+}
+
+function placementForFurniture(index: number, indoor: boolean): Placement {
+  const x = indoor ? sideX(index, 28, 72) : sideX(index, 22, 78);
+  return {
+    x,
+    y: indoor ? 70 : 74,
+    rotate: sideX(index, -4, 4),
+    size: 180,
+  };
+}
+
+function getSemanticPlacement(
+  objectName: string,
+  index: number,
+  narrationText: string,
+  background: string,
+  characterPlacement?: { x: number; y: number; scale: number }
+): Placement {
+  const text = (narrationText || '').toLowerCase();
+  const bg = (background || '').toLowerCase();
+  const kind = classifyObjectKind(objectName);
+
+  const characterX = clamp(characterPlacement?.x ?? 50, 20, 80);
+  const characterY = clamp(characterPlacement?.y ?? 62, 48, 74);
+  const roadLike = isRoadLike(text, bg);
+  const mountainLike = isMountainLike(text, bg);
+  const indoor = isIndoor(bg);
+
+  if (kind === 'vehicle') {
+    return placementForVehicle(index, roadLike, mountainLike);
+  }
+
+  if (kind === 'handheld' || kind === 'document') {
+    return placementNearCharacter(index, characterX, characterY, 14, kind === 'document' ? 128 : 116);
+  }
+
+  if (kind === 'weapon') {
+    const base = placementNearCharacter(index, characterX, characterY, 18, 140);
+    return { ...base, y: clamp(characterY + 4, 54, 78), rotate: sideX(index, -14, 14) };
+  }
+
+  if (kind === 'furniture') {
+    return placementForFurniture(index, indoor);
+  }
+
+  return {
+    x: clamp(characterX + (index % 2 === 0 ? -22 : 22), 12, 88),
+    y: mountainLike ? 72 : 68,
+    rotate: sideX(index, -6, 6),
+    size: 120,
+  };
+}
 
 /** Map common AI-generated object names to actual asset filenames */
 const OBJECT_NAME_MAP: Record<string, string> = {
@@ -98,12 +196,22 @@ const SafeObjectImg: React.FC<{ src: string; style: React.CSSProperties }> = ({ 
     <img
       src={src}
       style={style}
+      alt=""
       onError={() => setFailed(true)}
     />
   );
 };
 
-export const ObjectLayer: React.FC<ObjectLayerProps> = ({ objects, durationInFrames, mood, sceneType, objectFrames }) => {
+export const ObjectLayer: React.FC<ObjectLayerProps> = ({
+  objects,
+  durationInFrames,
+  mood,
+  sceneType,
+  objectFrames,
+  narrationText,
+  background,
+  characterPlacement,
+}) => {
   const frame = useCurrentFrame();
 
   if (!objects || objects.length === 0) return null;
@@ -116,16 +224,15 @@ export const ObjectLayer: React.FC<ObjectLayerProps> = ({ objects, durationInFra
   return (
     <AbsoluteFill style={{ pointerEvents: 'none' }}>
       {objects.slice(0, 3).map((objName, index) => {
-        const pos = isCaseBoard
-          ? CASE_BOARD_POSITIONS[index % CASE_BOARD_POSITIONS.length]
-          : isEvidenceShot
-            ? EVIDENCE_POSITIONS[index % EVIDENCE_POSITIONS.length]
-            : { ...OBJECT_POSITIONS[index % OBJECT_POSITIONS.length], size: 90 };
+        let pos = getSemanticPlacement(objName, index, narrationText || '', background || '', characterPlacement);
+        if (isCaseBoard) {
+          pos = CASE_BOARD_POSITIONS[index % CASE_BOARD_POSITIONS.length];
+        } else if (isEvidenceShot) {
+          pos = EVIDENCE_POSITIONS[index % EVIDENCE_POSITIONS.length];
+        }
 
         // Use audio-synced injection timing if available, otherwise stagger evenly
-        const entryFrame = objectFrames && objectFrames[index] !== undefined
-          ? objectFrames[index]
-          : index * 12;
+        const entryFrame = objectFrames?.[index] ?? index * 12;
 
         // Spring entrance from injection frame
         const localFrame = frame - entryFrame;

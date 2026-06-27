@@ -1,15 +1,20 @@
 import React, { useState } from 'react';
 import { AbsoluteFill, useCurrentFrame } from 'remotion';
 import type { CharacterExpression, PoseName } from '../lib/types';
-import { resolveCharacter, mapToPose, isAnimal, type CharacterName } from '../lib/asset-resolver';
+import { resolveCharacter, mapToPose, isAnimal, ALL_CHARACTERS, type CharacterName } from '../lib/asset-resolver';
 import { safePosition } from '../lib/layout';
 import { walkBob, walkTilt } from '../lib/animations';
+
+function validateCharacterName(name: string): CharacterName {
+  if ((ALL_CHARACTERS as readonly string[]).includes(name)) return name as CharacterName;
+  return 'marcus'; // safe fallback
+}
 
 /** Renders an image that silently hides itself if the asset is missing (404) */
 const SafeImg: React.FC<{ src: string; style: React.CSSProperties }> = ({ src, style }) => {
   const [failed, setFailed] = useState(false);
   if (failed) return null;
-  return <img src={src} style={style} onError={() => setFailed(true)} />;
+  return <img src={src} style={style} alt="" onError={() => setFailed(true)} />;
 };
 
 interface CharacterProps {
@@ -31,14 +36,17 @@ export const Character: React.FC<CharacterProps> = ({
 }) => {
   const frame = useCurrentFrame();
 
+  // Validate character name to prevent 404 on bad AI output
+  const validName = validateCharacterName(characterName);
+
   // Resolve pose: map legacy names + expression to actual extracted pose
   const resolvedPose: PoseName = mapToPose(pose, expression);
 
   // Get the PNG path
-  const imageSrc = resolveCharacter(characterName, resolvedPose);
+  const imageSrc = resolveCharacter(validName, resolvedPose);
 
   // Calculate position
-  const baseScale = isAnimal(characterName) ? 0.7 : 1.0;
+  const baseScale = isAnimal(validName) ? 0.7 : 1.0;
   let posStyle: React.CSSProperties;
 
   if (placement) {

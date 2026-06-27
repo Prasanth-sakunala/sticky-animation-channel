@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { generateJSON } from '../services/gemini.js';
 import { generateStoryboard } from '../services/storyboard-engine.js';
+import { validateScenePack } from '../utils/scene-quality-gate.js';
 import type { SceneBreakdown } from '../types.js';
 
 export const scenesRouter = Router();
@@ -20,10 +21,10 @@ scenesRouter.post('/', async (req, res) => {
 
         const scenes = storyboard.scenes.map((s: any) => ({
           scene_id: s.scene_id,
-          narration_text: s.narration_text,
-          duration_estimate: s.duration_estimate,
+          narration_text: s.narration_text || '',
+          duration_estimate: s.duration_estimate || 4,
           // Use PNG background resolved from description
-          background: s.background_asset || 'suburban_house',
+          background: s.background_asset || 'bg17_suburb_day',
           character_name: s.character_name || s.character?.name || 'marcus',
           character_pose: s.character?.pose || 'standing_neutral',
           character_expression: s.character?.expression || 'neutral',
@@ -39,7 +40,7 @@ scenesRouter.post('/', async (req, res) => {
           composition: s.character ? {
             character: {
               ...s.character,
-              name: s.character_name || s.character.name,
+              name: s.character_name || s.character.name || 'marcus',
             },
             camera: s.camera,
             lighting: s.lighting,
@@ -50,11 +51,22 @@ scenesRouter.post('/', async (req, res) => {
         const result: SceneBreakdown = {
           title: title || 'Untitled',
           total_scenes: scenes.length,
-          estimated_duration_sec: scenes.reduce((sum, s) => sum + s.duration_estimate, 0),
+          estimated_duration_sec: scenes.reduce((sum, s) => sum + (s.duration_estimate || 4), 0),
           scenes,
         };
 
-        return res.json(result);
+        // Quality gate
+        const gateResult = validateScenePack(scenes);
+        if (!gateResult.passed) {
+          return res.status(422).json({
+            error: 'Scene pack failed quality gate',
+            score: gateResult.score,
+            issues: gateResult.issues,
+            stats: gateResult.stats,
+          });
+        }
+
+        return res.json({ ...result, quality_gate: { score: gateResult.score, issues: gateResult.issues } });
       } catch (directorError: any) {
         console.warn('Storyboard Engine failed, falling back to legacy:', directorError.message);
         // Fall through to legacy prompt

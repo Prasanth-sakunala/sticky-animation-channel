@@ -13,6 +13,23 @@ import { DepthLayer } from './components/DepthLayer';
 import { generateAudioSync, isHitFrame } from './lib/audio-sync';
 import type { SceneProps } from './lib/types';
 
+const BLOCKED_OVERLAY_TEXT = new Set([
+  'THE CASE BEGINS',
+  'THE CLUE',
+  'TIMELINE',
+  'CASE FILE',
+  'WHAT HAPPENED?',
+  'THE TURNING POINT',
+]);
+
+function sanitizeOverlay(input: string | null): string | null {
+  const cleaned = (input || '').trim();
+  if (!cleaned) return null;
+  if (BLOCKED_OVERLAY_TEXT.has(cleaned.toUpperCase())) return null;
+  if (cleaned.length > 32) return null;
+  return cleaned;
+}
+
 // Map mood/objects to particle effects
 function getParticleEffect(mood: string, objects: string[], fgTokens?: string[]): { type: 'snow' | 'rain' | 'dust' | 'embers'; intensity: 'light' | 'medium' | 'heavy' } | null {
   if (fgTokens) {
@@ -50,11 +67,13 @@ export const Scene: React.FC<SceneProps> = ({
   const cameraMovement = composition?.camera?.movement || camera;
   const focalPoint = composition?.camera?.focal_point || { x: 50, y: 45 };
   const cameraIntensity = composition?.camera?.intensity || 'moderate';
-  const overlayText: string | null = !text_overlay
-    ? null
-    : typeof text_overlay === 'object'
-      ? text_overlay.text
-      : text_overlay;
+  let overlayTextRaw: string | null = null;
+  if (typeof text_overlay === 'string') {
+    overlayTextRaw = text_overlay;
+  } else if (text_overlay && typeof text_overlay === 'object') {
+    overlayTextRaw = text_overlay.text || null;
+  }
+  const overlayText = sanitizeOverlay(overlayTextRaw);
 
   // Audio sync — generate beat markers from narration text
   const audioSync = generateAudioSync(narration_text || '', durationInFrames);
@@ -91,7 +110,7 @@ export const Scene: React.FC<SceneProps> = ({
 
         {(!composition || composition.character?.visible) && (
           <Character
-            characterName={(composition?.character?.name || character_name || 'marcus') as any}
+            characterName={composition?.character?.name || character_name || 'marcus'}
             pose={composition?.character?.pose || character_pose}
             expression={composition?.character?.expression || character_expression}
             mood={composition?.mood || mood}
@@ -116,6 +135,9 @@ export const Scene: React.FC<SceneProps> = ({
           mood={composition?.mood || mood}
           objectFrames={audioSync.objectFrames}
           sceneType={scene_type}
+          narrationText={narration_text}
+          background={background}
+          characterPlacement={composition?.character?.placement}
         />
         {particles && <ParticleLayer type={particles.type} intensity={particles.intensity} durationInFrames={durationInFrames} />}
         {overlayText && <TextOverlay 

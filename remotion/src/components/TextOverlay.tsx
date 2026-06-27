@@ -22,26 +22,27 @@ export const TextOverlay: React.FC<TextOverlayProps> = ({ text, durationInFrames
   if (opacity <= 0) return null;
 
   return (
-    <AbsoluteFill style={{ justifyContent: 'flex-end', alignItems: 'center', padding: 60 }}>
+    <AbsoluteFill style={{ justifyContent: 'flex-start', alignItems: 'flex-start', padding: 56 }}>
       <div
         style={{
           backgroundColor: 'rgba(10, 10, 20, 0.82)',
-          padding: '18px 44px',
+          padding: '10px 18px',
           borderRadius: 10,
           transform: `translateY(${translateY}px) scale(${scale})`,
           opacity,
-          borderLeft: '4px solid #f0c040',
+          borderLeft: '3px solid #f0c040',
           boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
           backdropFilter: 'blur(4px)',
+          maxWidth: 600,
         }}
       >
         <span
           style={{
             color: '#ffffff',
-            fontSize: 36,
-            fontFamily: 'Arial, sans-serif',
+            fontSize: 24,
+            fontFamily: 'Georgia, Times New Roman, serif',
             fontWeight: 600,
-            letterSpacing: 1,
+            letterSpacing: 0.6,
             textShadow: '0 2px 6px rgba(0,0,0,0.6)',
           }}
         >

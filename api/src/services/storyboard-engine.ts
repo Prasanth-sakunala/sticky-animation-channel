@@ -98,6 +98,15 @@ const AVAILABLE_CHARACTERS = {
   animals: ['buddy', 'shadow', 'rex_dog', 'whiskers', 'bear', 'fang', 'patches', 'crow'],
 };
 
+type CharacterGroup = keyof typeof AVAILABLE_CHARACTERS;
+
+const CHARACTER_ROTATION = [
+  ...AVAILABLE_CHARACTERS.male,
+  ...AVAILABLE_CHARACTERS.female,
+  ...AVAILABLE_CHARACTERS.kids,
+  ...AVAILABLE_CHARACTERS.animals,
+];
+
 // Available backgrounds — these names are matched against keywords in the asset resolver
 const AVAILABLE_BACKGROUNDS = [
   'bg01_living_room_day', 'bg02_living_room_night', 'bg03_bedroom_night',
@@ -192,16 +201,22 @@ export async function generateStoryboard(
   // Step 2: Assign acts and pacing beats based on emotion arc
   const actStructure = determineActStructure(rawScenes.length, emotionArc);
 
-  // Step 3: Enrich scenes with emotion data + character assignment + visual variety
-  const enriched = enrichScenes(rawScenes, emotionArc, actStructure);
+  // Step 3: Stabilize role casting so one person keeps one visual identity
+  const casted = enforceCharacterCasting(rawScenes);
 
-  // Step 4: Enforce concrete mystery visuals before rendering
+  // Step 4: Enrich scenes with emotion data + character assignment + visual variety
+  const enriched = enrichScenes(casted, emotionArc, actStructure);
+
+  // Step 5: Enforce concrete mystery visuals before rendering
   const concrete = enforceMysteryVisuals(enriched);
 
-  // Step 5: Enforce visual variety (no repeated cameras in sequence)
-  const varied = enforceVisualVariety(concrete);
+  // Step 6: Enforce background variety and prevent long streaks
+  const withBackgroundVariety = enforceBackgroundVariety(concrete);
 
-  // Step 6: Score pacing quality
+  // Step 7: Enforce visual variety (no repeated cameras in sequence)
+  const varied = enforceVisualVariety(withBackgroundVariety);
+
+  // Step 8: Score pacing quality
   const pacingScore = scorePacing(varied, actStructure);
 
   return {
@@ -210,6 +225,122 @@ export async function generateStoryboard(
     act_structure: actStructure,
     pacing_score: pacingScore,
   };
+}
+
+function normalizeCharacterName(value: string | undefined): string {
+  return (value || '').trim().toLowerCase();
+}
+
+function isKnownCharacter(value: string | undefined): value is string {
+  const normalized = normalizeCharacterName(value);
+  return CHARACTER_ROTATION.includes(normalized as any);
+}
+
+function fallbackCharacterForScene(index: number): string {
+  return CHARACTER_ROTATION[index % CHARACTER_ROTATION.length] || 'marcus';
+}
+
+function inferRoleToken(text: string, lastRoleByGender: { male: string; female: string; kid: string; animal: string }): { role: string; group: CharacterGroup } {
+  const lower = text.toLowerCase();
+
+  if (/\b(dog|cat|wolf|bear|crow|pet|animal)\b/.test(lower)) {
+    return { role: 'animal_main', group: 'animals' };
+  }
+
+  if (/\b(boy|girl|kid|child|children|daughter|son|teen)\b/.test(lower)) {
+    const isGirl = /\b(girl|daughter)\b/.test(lower);
+    return { role: isGirl ? 'girl_main' : 'boy_main', group: 'kids' };
+  }
+
+  if (/\b(detective|officer|police|cop|inspector|suspect|witness)\b/.test(lower)) {
+    return { role: 'detective_or_case_role', group: 'male' };
+  }
+
+  if (/\b(wife|mother|woman|lady|her|hers|she)\b/.test(lower)) {
+    return { role: 'female_main', group: 'female' };
+  }
+
+  if (/\b(husband|father|man|guy|him|his|he)\b/.test(lower)) {
+    return { role: 'male_main', group: 'male' };
+  }
+
+  if (/\b(she|her)\b/.test(lower) && lastRoleByGender.female) {
+    return { role: lastRoleByGender.female, group: 'female' };
+  }
+
+  if (/\b(he|his|him)\b/.test(lower) && lastRoleByGender.male) {
+    return { role: lastRoleByGender.male, group: 'male' };
+  }
+
+  if (/\b(it|animal|pet)\b/.test(lower) && lastRoleByGender.animal) {
+    return { role: lastRoleByGender.animal, group: 'animals' };
+  }
+
+  return { role: 'narrator_bridge', group: 'male' };
+}
+
+function pickUnusedCharacter(pool: readonly string[], used: Set<string>, fallbackIndex: number): string {
+  const unused = pool.find((name) => !used.has(name));
+  if (unused) return unused;
+  return pool[fallbackIndex % pool.length] || fallbackCharacterForScene(fallbackIndex);
+}
+
+function enforceCharacterCasting(scenes: StoryboardScene[]): StoryboardScene[] {
+  const roleToCharacter = new Map<string, string>();
+  const usedCharacters = new Set<string>();
+  const lastRoleByGender = { male: '', female: '', kid: '', animal: '' };
+
+  const casted = scenes.map((scene, index) => {
+    const existing = normalizeCharacterName(scene.character_name || (scene.character as any)?.name);
+    const role = inferRoleToken(scene.narration_text || '', lastRoleByGender);
+
+    let assigned = '';
+
+    if (isKnownCharacter(existing)) {
+      assigned = existing;
+      if (!roleToCharacter.has(role.role)) roleToCharacter.set(role.role, assigned);
+    } else if (roleToCharacter.has(role.role)) {
+      assigned = roleToCharacter.get(role.role)!;
+    } else {
+      const pool = AVAILABLE_CHARACTERS[role.group];
+      assigned = pickUnusedCharacter(pool, usedCharacters, index);
+      roleToCharacter.set(role.role, assigned);
+    }
+
+    usedCharacters.add(assigned);
+    if (role.group === 'male') lastRoleByGender.male = role.role;
+    if (role.group === 'female') lastRoleByGender.female = role.role;
+    if (role.group === 'kids') lastRoleByGender.kid = role.role;
+    if (role.group === 'animals') lastRoleByGender.animal = role.role;
+
+    return {
+      ...scene,
+      character_name: assigned,
+      character: scene.character
+        ? {
+            ...scene.character,
+            name: assigned,
+          }
+        : scene.character,
+    };
+  });
+
+  // If the model still collapsed to one person, force controlled alternation
+  const uniqueVisibleCharacters = new Set(casted.map((s) => s.character_name).filter(Boolean));
+  if (casted.length >= 6 && uniqueVisibleCharacters.size < 2) {
+    return casted.map((scene, idx) => ({
+      ...scene,
+      character_name: fallbackCharacterForScene(idx),
+      character: scene.character
+        ? {
+            ...scene.character,
+            name: fallbackCharacterForScene(idx),
+          }
+        : scene.character,
+    }));
+  }
+
+  return casted;
 }
 
 /** Generate raw scene breakdown with character/background assignments */
@@ -324,7 +455,18 @@ Output JSON:
 }`;
 
   const result = await generateJSON<{ scenes: StoryboardScene[]; character_map?: Record<string, string> }>(prompt, 0.4);
-  return result.scenes || [];
+  const scenes = result?.scenes || [];
+  // Ensure every scene has minimum required fields to prevent downstream crashes
+  return scenes.map((s, idx) => ({
+    ...s,
+    scene_id: s.scene_id ?? idx + 1,
+    narration_text: s.narration_text || '',
+    duration_estimate: s.duration_estimate || 4,
+    character_name: s.character_name || '',
+    background_asset: s.background_asset || '',
+    scene_objects: s.scene_objects || [],
+    mood: s.mood || 'mysterious',
+  }));
 }
 
 /** Determine 3-act structure from scene count and emotion arc */
@@ -402,7 +544,7 @@ function enrichScenes(
     const beat = assignBeat(i, acts, scenes.length);
 
     // Find matching emotion segment for this scene's text
-    const sceneWords = scene.narration_text.split(/\s+/).length;
+    const sceneWords = (scene.narration_text || '').split(/\s+/).length;
     let sceneIntensity = 0.5;
     let sceneMood = scene.mood;
 
@@ -461,7 +603,7 @@ export function enforceMysteryVisuals(scenes: StoryboardScene[]): StoryboardScen
     const shotType = classifyShotType(scene, sceneType, index);
     const characterAction = classifyCharacterAction(narration);
     const background = resolveConcreteBackground(scene.background_asset, narration, sceneType);
-    const objects = resolveConcreteObjects(scene.scene_objects || [], narration, sceneType).slice(0, 3);
+    const objects = resolveConcreteObjects(scene.scene_objects || [], narration).slice(0, 3);
     const textOverlay = scene.text_overlay || buildTextOverlay(scene, sceneType, index);
     const character = buildSceneTypeCharacter(scene, sceneType, objects, shotType, characterAction, index);
     const camera = buildSceneTypeCamera(scene, sceneType, shotType, index);
@@ -488,10 +630,10 @@ function classifySceneType(scene: StoryboardScene, index: number): SceneType {
 
   if (index === 0 || scene.beat === 'hook') return 'reveal_or_twist';
   if (scene.beat === 'twist' || scene.beat === 'climax') return 'reveal_or_twist';
-  if (/\b(19|20)\d{2}\b|january|february|march|april|may|june|july|august|september|october|november|december|years? later|days? later|hours? later/.test(text)) {
+  if (hasTemporalCue(text)) {
     return 'timeline_card';
   }
-  if (/newspaper|report|file|case|evidence|clue|letter|note|diary|photo|photograph|envelope|phone|call|key|box|suitcase|ring|handprint|weapon|knife|gun|rope/.test(text)) {
+  if (hasEvidenceCue(text)) {
     return 'evidence_closeup';
   }
   if (/police|detective|witness|suspect|family|wife|husband|man|woman|boy|girl|officer/.test(text)) {
@@ -502,6 +644,19 @@ function classifySceneType(scene: StoryboardScene, index: number): SceneType {
   }
   if (index % 5 === 0) return 'case_board';
   return 'narrator_bridge';
+}
+
+function hasTemporalCue(text: string): boolean {
+  if (/\b(19|20)\d{2}\b/.test(text)) return true;
+  if (/january|february|march|april|may|june|july|august|september|october|november|december/.test(text)) return true;
+  return /years? later|days? later|hours? later/.test(text);
+}
+
+function hasEvidenceCue(text: string): boolean {
+  if (/newspaper|report|file|case|evidence|clue|weapon/.test(text)) return true;
+  if (/letter|note|diary|photo|photograph|envelope/.test(text)) return true;
+  if (/phone|call|key|box|suitcase|ring|handprint/.test(text)) return true;
+  return /knife|gun|rope/.test(text);
 }
 
 function classifyShotType(scene: StoryboardScene, sceneType: SceneType, index: number): ShotType {
@@ -534,23 +689,67 @@ function resolveConcreteBackground(background: string | undefined, narration: st
   if (normalized && AVAILABLE_BACKGROUNDS.includes(normalized)) return normalized;
 
   const text = narration.toLowerCase();
+
+  // Comprehensive keyword-to-background mapping — ordered from most specific to least.
+  // Each narration line MUST get a background that matches its content.
   const keywordMatches: Array<[RegExp, string]> = [
-    [/police|detective|station|case file|report/, 'bg39_police_station'],
-    [/court|judge|trial|legal/, 'bg38_courtroom'],
-    [/grave|cemetery|buried|dead|body/, 'bg37_graveyard_night'],
-    [/rain|storm|street|night road/, 'bg41_rainy_street_night'],
-    [/alley|backstreet/, 'bg19_alley_night'],
-    [/tunnel|underground/, 'bg40_tunnel'],
-    [/prison|cell|jail/, 'bg36_prison_cell'],
-    [/warehouse|abandoned/, 'bg35_warehouse'],
-    [/mountain|cliff|pass|snow/, 'bg31_mountain_cliff'],
-    [/forest|woods|fog/, 'bg43_foggy_forest'],
-    [/lake|river|water/, 'bg29_lake'],
-    [/hospital|doctor|medical/, 'bg11_hospital_room'],
-    [/office|desk|file/, 'bg09_office_day'],
-    [/house|home|suburb|neighborhood/, 'bg18_suburb_night'],
-    [/city|downtown/, 'bg26_downtown_night'],
-    [/gas station/, 'bg24_gas_station_night'],
+    // Specific locations (high priority)
+    [/\bpolice station\b/, 'bg39_police_station'],
+    [/\bcourtroom|court\b|trial|judge/, 'bg38_courtroom'],
+    [/\bgrave|cemetery|graveyard|burial\b/, 'bg37_graveyard_night'],
+    [/\bgas station\b/, 'bg24_gas_station_night'],
+    [/\brooftop\b/, 'bg22_rooftop_night'],
+    [/\bbridge\b/, 'bg23_bridge_night'],
+    [/\bparking lot|parking\b/, 'bg20_parking_lot_night'],
+    [/\bconvenience store|shop|store\b/, 'bg12_convenience_store'],
+    [/\bdiner|restaurant\b/, 'bg13_diner'],
+    [/\bbar|pub\b/, 'bg14_bar_night'],
+    [/\bchurch|chapel\b/, 'bg15_church'],
+    [/\bgym|workout\b/, 'bg16_gym'],
+    [/\bschool|classroom|class\b/, 'bg10_classroom'],
+    [/\bhospital|doctor|medical|nurse|emergency room\b/, 'bg11_hospital_room'],
+    [/\bprison|jail|cell|behind bars\b/, 'bg36_prison_cell'],
+    [/\bwarehouse|abandoned building|factory\b/, 'bg35_warehouse'],
+    [/\btunnel|underground|subway\b/, 'bg40_tunnel'],
+    [/\bcave|cavern\b/, 'bg32_cave'],
+    [/\bswamp|marsh|bog\b/, 'bg34_swamp'],
+    // Weather/time-specific locations
+    [/\brain|storm|thunder|downpour|wet street\b/, 'bg41_rainy_street_night'],
+    [/\bsnow|blizzard|frozen|ice|winter\b/, 'bg42_snowy_suburb'],
+    [/\bfog|mist|foggy\b/, 'bg43_foggy_forest'],
+    [/\bsunset|dusk|golden hour\b/, 'bg45_sunset_field'],
+    [/\bovercast|cloudy|grey sky|gray sky\b/, 'bg46_overcast_city'],
+    [/\bstormy|lightning\b/, 'bg44_stormy_beach'],
+    // Outdoor locations
+    [/\bmountain|cliff|summit|peak|hiking|hill\b/, 'bg31_mountain_cliff'],
+    [/\bforest|woods|tree|trees\b/, 'bg27_forest_day'],
+    [/\blake|pond\b/, 'bg29_lake'],
+    [/\briver|stream|creek\b/, 'bg29_lake'],
+    [/\bbeach|shore|coast|ocean|sea\b/, 'bg33_beach'],
+    [/\bfield|meadow|grass|farm\b/, 'bg30_field_day'],
+    [/\bpark|garden|bench|playground\b/, 'bg21_park_day'],
+    [/\bhighway|freeway|drove|driving|road trip\b/, 'bg25_highway_day'],
+    // Urban locations
+    [/\balley|back alley|dark alley\b/, 'bg19_alley_night'],
+    [/\bcity|downtown|skyscraper|urban\b/, 'bg26_downtown_night'],
+    [/\bstreet|sidewalk|crosswalk|intersection\b/, 'bg17_suburb_day'],
+    [/\bneighborhood|suburb|residential\b/, 'bg17_suburb_day'],
+    // Indoor locations
+    [/\boffice|desk|cubicle|workspace\b/, 'bg09_office_day'],
+    [/\bkitchen|cook|stove|fridge\b/, 'bg04_kitchen_day'],
+    [/\bbedroom|bed|sleep|woke up|waking\b/, 'bg03_bedroom_night'],
+    [/\bliving room|couch|sofa|tv\b/, 'bg01_living_room_day'],
+    [/\bhallway|corridor|passage\b/, 'bg06_hallway_night'],
+    [/\bbasement|cellar\b/, 'bg05_basement'],
+    [/\battic|crawlspace\b/, 'bg08_attic'],
+    [/\bgarage|car|vehicle|trunk\b/, 'bg07_garage'],
+    // Activity-based (use context of what's happening)
+    [/\bdetective|investigat|inspect|officer|cop|police\b/, 'bg39_police_station'],
+    [/\bwalk|stroll|wander|path|trail\b/, 'bg21_park_day'],
+    [/\bran|run|running|chase|fled|escape\b/, 'bg19_alley_night'],
+    [/\bdark|night|shadow|midnight|late\b/, 'bg26_downtown_night'],
+    [/\bhome|house|door|doorstep|porch|yard\b/, 'bg18_suburb_night'],
+    [/\bmorning|dawn|sunrise|early\b/, 'bg17_suburb_day'],
   ];
 
   for (const [pattern, asset] of keywordMatches) {
@@ -559,24 +758,41 @@ function resolveConcreteBackground(background: string | undefined, narration: st
 
   if (normalized && GENERIC_BACKGROUND_REPLACEMENTS[normalized]) return GENERIC_BACKGROUND_REPLACEMENTS[normalized];
 
+  // Absolute last resort: cycle through varied backgrounds based on mood and index
+  // This prevents the same fallback from being used repeatedly
+  return pickFallbackBackground(sceneType, text);
+}
+
+/** Round-robin fallback that at least picks something mood-appropriate rather than always the same one */
+function pickFallbackBackground(sceneType: SceneType, text: string): string {
+  // Mood-suggestive fallbacks — pick based on content tone
+  if (/happy|love|friend|family|smile|joy|morning|bright/.test(text)) {
+    return 'bg21_park_day';
+  }
+  if (/fear|dark|danger|threat|scream|blood|murder|kill|dead/.test(text)) {
+    return 'bg28_forest_night';
+  }
+  if (/sad|loss|grief|alone|cry|miss|gone/.test(text)) {
+    return 'bg45_sunset_field';
+  }
+  if (/mystery|secret|hidden|unknown|strange|weird/.test(text)) {
+    return 'bg43_foggy_forest';
+  }
+
+  // SceneType-based fallback with variety
   switch (sceneType) {
-    case 'evidence_closeup':
-    case 'case_board':
-      return 'bg09_office_day';
-    case 'timeline_card':
-      return 'bg39_police_station';
-    case 'reveal_or_twist':
-      return 'bg41_rainy_street_night';
-    case 'suspect_or_witness':
-      return 'bg39_police_station';
-    case 'location_establishing':
-      return 'bg26_downtown_night';
-    default:
-      return 'bg17_suburb_day';
+    case 'evidence_closeup': return 'bg09_office_day';
+    case 'case_board': return 'bg39_police_station';
+    case 'timeline_card': return 'bg46_overcast_city';
+    case 'reveal_or_twist': return 'bg22_rooftop_night';
+    case 'suspect_or_witness': return 'bg14_bar_night';
+    case 'location_establishing': return 'bg25_highway_day';
+    case 'narrator_bridge': return 'bg30_field_day';
+    default: return 'bg46_overcast_city';
   }
 }
 
-function resolveConcreteObjects(objects: string[], narration: string, sceneType: SceneType): string[] {
+function resolveConcreteObjects(objects: string[], narration: string): string[] {
   const resolved = new Set<string>();
   for (const object of objects) {
     const normalized = normalizeKey(object);
@@ -608,39 +824,26 @@ function resolveConcreteObjects(objects: string[], narration: string, sceneType:
   ];
 
   for (const [pattern, asset] of keywordMatches) {
-    if (pattern.test(text)) resolved.add(asset);
-  }
-
-  if (resolved.size === 0) {
-    if (sceneType === 'timeline_card') resolved.add('obj32_newspaper');
-    if (sceneType === 'case_board') {
-      resolved.add('obj32_newspaper');
-      resolved.add('obj19_photograph');
+    if (pattern.test(text)) {
+      resolved.add(asset);
     }
-    if (sceneType === 'evidence_closeup' || sceneType === 'reveal_or_twist') resolved.add('obj19_photograph');
   }
 
   return [...resolved];
 }
 
-function buildTextOverlay(scene: StoryboardScene, sceneType: SceneType, index: number): string | null {
+function buildTextOverlay(scene: StoryboardScene, sceneType: SceneType, _index: number): string | null {
   const text = scene.narration_text || '';
-  const year = text.match(/\b(19|20)\d{2}\b/)?.[0];
+  const year = /\b(19|20)\d{2}\b/.exec(text)?.[0];
   if (year) return year;
-  if (index === 0) return 'THE CASE BEGINS';
 
-  switch (sceneType) {
-    case 'evidence_closeup':
-      return 'THE CLUE';
-    case 'timeline_card':
-      return 'TIMELINE';
-    case 'case_board':
-      return 'CASE FILE';
-    case 'reveal_or_twist':
-      return scene.beat === 'climax' ? 'THE TURNING POINT' : 'WHAT HAPPENED?';
-    default:
-      return null;
+  // Keep overlays sparse and meaningful; avoid repetitive subtitle-like cards.
+  if (sceneType === 'timeline_card') {
+    const relativeTime = /\b(\d+\s+(minutes?|hours?|days?|weeks?|months?|years?)\s+later)\b/i.exec(text)?.[0];
+    if (relativeTime) return relativeTime.toUpperCase();
   }
+
+  return null;
 }
 
 function buildSceneTypeCharacter(
@@ -670,7 +873,7 @@ function buildSceneTypeCharacter(
     return {
       ...base,
       visible: true,
-      placement: pickPlacement(index, shotType, action),
+      placement: pickPlacement(index, shotType, action, scene.background_asset, scene.narration_text || ''),
       pose: poseForAction(action) as any,
       expression: expressionForAction(action) as any,
       silhouette: true,
@@ -681,7 +884,7 @@ function buildSceneTypeCharacter(
     return {
       ...base,
       visible: true,
-      placement: pickPlacement(index, shotType, action),
+      placement: pickPlacement(index, shotType, action, scene.background_asset, scene.narration_text || ''),
       pose: poseForAction(action) as any,
       expression: expressionForAction(action) as any,
       silhouette: scene.beat === 'twist' || scene.beat === 'climax',
@@ -698,21 +901,97 @@ function buildSceneTypeCharacter(
   return {
     ...base,
     visible: true,
-    placement: pickPlacement(index, shotType, action),
+    placement: pickPlacement(index, shotType, action, scene.background_asset, scene.narration_text || ''),
     pose: poseForAction(action) as any,
     expression: expressionForAction(action) as any,
   };
 }
 
-function pickPlacement(index: number, shotType: ShotType, action: CharacterAction): { x: number; y: number; scale: number } {
-  const side = index % 2 === 0 ? 34 : 66;
-  if (shotType === 'establishing') return { x: side, y: 66, scale: 0.24 };
-  if (shotType === 'wide') return { x: side, y: 65, scale: 0.34 };
-  if (shotType === 'close_up') return { x: side, y: 60, scale: 0.64 };
-  if (shotType === 'extreme_close_up') return { x: side, y: 58, scale: 0.76 };
-  if (action === 'hiding') return { x: side, y: 70, scale: 0.38 };
-  if (action === 'running') return { x: index % 2 === 0 ? 28 : 72, y: 63, scale: 0.46 };
-  return { x: side, y: 62, scale: 0.48 };
+function sideValue(index: number, left: number, right: number): number {
+  return index % 2 === 0 ? left : right;
+}
+
+function placementEnvironment(background: string | undefined, narration: string): {
+  outdoor: boolean;
+  roadLike: boolean;
+  mountainLike: boolean;
+  indoor: boolean;
+  baseY: number;
+} {
+  const bg = (background || '').toLowerCase();
+  const text = narration.toLowerCase();
+
+  const outdoor = /forest|lake|field|mountain|beach|highway|street|bridge|park/.test(bg);
+  const roadLike = /highway|street|road|bridge/.test(bg) || /\b(road|street|path|trail|bridge)\b/.test(text);
+  const mountainLike = /mountain|cliff/.test(bg) || /\b(mountain|cliff|hill)\b/.test(text);
+  const indoor = /living_room|kitchen|bedroom|office|hospital|classroom|courtroom|station|prison|warehouse/.test(bg);
+
+  let baseY = 64;
+  if (mountainLike) baseY = 70;
+  else if (roadLike) baseY = 68;
+  else if (outdoor) baseY = 66;
+  else if (indoor) baseY = 63;
+
+  return { outdoor, roadLike, mountainLike, indoor, baseY };
+}
+
+function shotScale(shotType: ShotType, outdoor: boolean): number {
+  const scales: Record<ShotType, number> = {
+    establishing: outdoor ? 0.22 : 0.26,
+    wide: outdoor ? 0.32 : 0.36,
+    medium: outdoor ? 0.44 : 0.5,
+    close_up: outdoor ? 0.56 : 0.62,
+    extreme_close_up: outdoor ? 0.68 : 0.74,
+    pov: 0.4,
+  };
+  return scales[shotType];
+}
+
+function walkingPlacement(index: number, baseY: number, scale: number, roadLike: boolean, mountainLike: boolean): { x: number; y: number; scale: number } {
+  const pathLike = roadLike || mountainLike;
+  const x = pathLike ? sideValue(index, 42, 58) : sideValue(index, 28, 72);
+  const adjustedScale = pathLike
+    ? Math.max(0.32, scale - 0.05)
+    : Math.max(0.34, scale - 0.03);
+  return { x, y: baseY, scale: adjustedScale };
+}
+
+function closeupPlacement(index: number, baseY: number, scale: number): { x: number; y: number; scale: number } {
+  return {
+    x: sideValue(index, 34, 66),
+    y: Math.max(58, baseY - 3),
+    scale,
+  };
+}
+
+function pickPlacement(
+  index: number,
+  shotType: ShotType,
+  action: CharacterAction,
+  background: string | undefined,
+  narration: string
+): { x: number; y: number; scale: number } {
+  const env = placementEnvironment(background, narration);
+  const scale = shotScale(shotType, env.outdoor);
+  const side = sideValue(index, 34, 66);
+
+  if (action === 'hiding') {
+    return { x: side, y: Math.min(72, env.baseY + 5), scale: Math.max(0.34, scale - 0.1) };
+  }
+
+  if (action === 'running' || action === 'walking') {
+    return walkingPlacement(index, env.baseY, scale, env.roadLike, env.mountainLike);
+  }
+
+  if (action === 'looking' || action === 'pointing') {
+    return { x: sideValue(index, 38, 62), y: Math.max(58, env.baseY - 2), scale };
+  }
+
+  if (shotType === 'close_up' || shotType === 'extreme_close_up') {
+    return closeupPlacement(index, env.baseY, scale);
+  }
+
+  return { x: side, y: env.baseY, scale };
 }
 
 function poseForAction(action: CharacterAction): string {
@@ -801,15 +1080,112 @@ function enforceVisualVariety(scenes: StoryboardScene[]): StoryboardScene[] {
     const prev = scenes[i - 1];
     const curr = scenes[i];
 
+    // Ensure camera object always has required shape
+    if (!curr.camera) {
+      curr.camera = { movement: 'slow_zoom_in', focal_point: { x: 50, y: 55 }, intensity: 'moderate' } as any;
+    }
+    if (!prev.camera) {
+      prev.camera = { movement: 'static', focal_point: { x: 50, y: 55 }, intensity: 'moderate' } as any;
+    }
+
     // Only enforce camera variety — background stays as Gemini assigned
-    // (if the story takes place in one room, the background SHOULD repeat)
-    if (curr.camera?.movement === prev.camera?.movement) {
+    if (curr.camera.movement === prev.camera.movement) {
       const cameraOptions: Array<typeof curr.camera.movement> = ['static', 'slow_zoom_in', 'slow_zoom_out', 'pan_left', 'pan_right', 'drift_up', 'dolly_in', 'orbit', 'push_in', 'pull_back', 'tilt_up', 'crane_up'];
       const filtered = cameraOptions.filter((c) => c !== curr.camera.movement);
       curr.camera.movement = filtered[i % filtered.length];
     }
   }
   return scenes;
+}
+
+function enforceBackgroundVariety(scenes: StoryboardScene[]): StoryboardScene[] {
+  // The primary goal: each scene's background should match its narration.
+  // resolveConcreteBackground already handles this per-scene.
+  // This function only intervenes when the SAME background appears 3+ times in a row,
+  // which means the story genuinely stays in one location for a while.
+  // In that case, we pick a related but different variant (day/night, angle shift).
+
+  const usedBackgrounds = new Set<string>();
+
+  return scenes.map((scene, index) => {
+    let selected = scene.background_asset;
+    usedBackgrounds.add(selected);
+
+    // Only intervene on exact consecutive repeats (3+ in a row)
+    if (index >= 2) {
+      const prev1 = scenes[index - 1].background_asset;
+      const prev2 = scenes[index - 2].background_asset;
+      if (selected === prev1 && selected === prev2) {
+        // Find a related variant or narration-driven alternative
+        const variant = findRelatedVariant(selected, scene.narration_text || '', scene.mood, usedBackgrounds);
+        if (variant) {
+          selected = variant;
+        }
+      }
+    }
+
+    scene.background_asset = selected;
+    return scene;
+  });
+}
+
+function findRelatedVariant(
+  current: string,
+  narration: string,
+  mood: string,
+  alreadyUsed: Set<string>
+): string | null {
+  // Day/night pairs
+  const dayNightPairs: Record<string, string> = {
+    'bg01_living_room_day': 'bg02_living_room_night',
+    'bg02_living_room_night': 'bg01_living_room_day',
+    'bg17_suburb_day': 'bg18_suburb_night',
+    'bg18_suburb_night': 'bg17_suburb_day',
+    'bg27_forest_day': 'bg28_forest_night',
+    'bg28_forest_night': 'bg27_forest_day',
+    'bg30_field_day': 'bg45_sunset_field',
+    'bg45_sunset_field': 'bg30_field_day',
+    'bg33_beach': 'bg44_stormy_beach',
+    'bg44_stormy_beach': 'bg33_beach',
+    'bg26_downtown_night': 'bg46_overcast_city',
+    'bg46_overcast_city': 'bg26_downtown_night',
+    'bg43_foggy_forest': 'bg27_forest_day',
+    'bg42_snowy_suburb': 'bg17_suburb_day',
+  };
+
+  // Same-family alternatives (similar vibe, different location)
+  const familyAlternatives: Record<string, string[]> = {
+    'bg39_police_station': ['bg09_office_day', 'bg38_courtroom'],
+    'bg09_office_day': ['bg39_police_station', 'bg10_classroom'],
+    'bg17_suburb_day': ['bg21_park_day', 'bg25_highway_day'],
+    'bg21_park_day': ['bg30_field_day', 'bg17_suburb_day'],
+    'bg19_alley_night': ['bg26_downtown_night', 'bg20_parking_lot_night'],
+    'bg26_downtown_night': ['bg19_alley_night', 'bg22_rooftop_night'],
+    'bg41_rainy_street_night': ['bg46_overcast_city', 'bg26_downtown_night'],
+    'bg35_warehouse': ['bg40_tunnel', 'bg05_basement'],
+    'bg31_mountain_cliff': ['bg45_sunset_field', 'bg30_field_day'],
+    'bg29_lake': ['bg33_beach', 'bg27_forest_day'],
+  };
+
+  // Try day/night swap first
+  if (dayNightPairs[current]) {
+    return dayNightPairs[current];
+  }
+
+  // Try family alternatives
+  const alternatives = familyAlternatives[current] || [];
+  for (const alt of alternatives) {
+    if (!alreadyUsed.has(alt) || Math.random() > 0.5) {
+      return alt;
+    }
+  }
+
+  // Try mood-based pick
+  if (mood === 'tense' || mood === 'dramatic') return 'bg22_rooftop_night';
+  if (mood === 'calm' || mood === 'upbeat') return 'bg21_park_day';
+  if (mood === 'mysterious') return 'bg43_foggy_forest';
+
+  return null;
 }
 
 /** Score overall pacing quality (0-10) */

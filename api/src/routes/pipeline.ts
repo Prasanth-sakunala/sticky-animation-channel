@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { generateHooks, applyHookToScript } from '../services/hook-generator.js';
 import { generateStoryboard } from '../services/storyboard-engine.js';
+import { validateScenePack } from '../utils/scene-quality-gate.js';
 
 export const pipelineRouter = Router();
 
@@ -76,12 +77,12 @@ pipelineRouter.post('/run', async (req, res) => {
         scenesData = {
           title: currentTopic,
           total_scenes: storyboard.scenes.length,
-          estimated_duration_sec: storyboard.scenes.reduce((sum: number, s: any) => sum + s.duration_estimate, 0),
+          estimated_duration_sec: storyboard.scenes.reduce((sum: number, s: any) => sum + (s.duration_estimate || 4), 0),
           scenes: storyboard.scenes.map((s: any) => ({
             scene_id: s.scene_id,
-            narration_text: s.narration_text,
-            duration_estimate: s.duration_estimate,
-            background: s.background_asset || 'suburban_house',
+            narration_text: s.narration_text || '',
+            duration_estimate: s.duration_estimate || 4,
+            background: s.background_asset || 'bg17_suburb_day',
             character_name: s.character_name || s.character?.name || 'marcus',
             character_pose: s.character?.pose || 'standing_neutral',
             character_expression: s.character?.expression || 'neutral',
@@ -97,7 +98,7 @@ pipelineRouter.post('/run', async (req, res) => {
             composition: s.character ? {
               character: {
                 ...s.character,
-                name: s.character_name || s.character.name,
+                name: s.character_name || s.character.name || 'marcus',
               },
               camera: s.camera,
               lighting: s.lighting,
@@ -106,6 +107,19 @@ pipelineRouter.post('/run', async (req, res) => {
           })),
         };
         steps.push(`storyboard complete (${scenesData.total_scenes} scenes, pacing: ${storyboard.pacing_score}/10, arc: ${storyboard.emotion_arc.arc_type})`);
+
+        // Quality gate — reject bad scene packs
+        const gateResult = validateScenePack(scenesData.scenes);
+        steps.push(`quality gate: score=${gateResult.score}/100, issues=${gateResult.issues.length}`);
+        if (!gateResult.passed) {
+          return res.status(422).json({
+            error: 'Scene pack failed quality gate',
+            score: gateResult.score,
+            issues: gateResult.issues,
+            stats: gateResult.stats,
+            steps,
+          });
+        }
       } catch (sbErr: any) {
         steps.push(`storyboard engine failed, falling back to legacy: ${sbErr.message}`);
         scenesData = null; // fall through to legacy
