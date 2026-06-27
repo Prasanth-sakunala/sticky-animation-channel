@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./assets:/app/assets
+      - ./output:/app/output
+      - ./credentials:/app/credentials
+    environment:
+      - NODE_ENV=production
+      - PORT=8002
+      - GEMINI_API_KEY=REDACTED_GEMINI_API_KEY
+      - KOKORO_TTS_URL=http://kokoro-tts:8003
+      - TTS_FALLBACK=edge-tts
+      - REMOTION_URL=http://remotion:3001
+    depends_on:
+      - kokoro-tts
+    restart: unless-stopped
+
+  kokoro-tts:
+    build: ./kokoro-tts
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./output/audio:/app/output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5680:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./output:/output
+    environment:
+      - N8N_PORT=5678
+      - GENERIC_TIMEZONE=Asia/Kolkata
+      - N8N_SECURE_COOKIE=false
+    restart: unless-stopped
+
+volumes:
+  n8n_data:

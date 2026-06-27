@@ -1,0 +1,231 @@
+{
+  "name": "Sticky Animation - Full Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 6 * * *" }]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Daily 6AM Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://host.docker.internal:8002/api/research",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "keyword", "value": "={{ $json.keyword || 'unsolved mysteries' }}" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "research-topic",
+      "name": "Research Topic",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8002/api/script/with-quality-gate",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "topic", "value": "={{ $json.selected_topic.topic }}" },
+            { "name": "angle", "value": "={{ $json.selected_topic.angle }}" },
+            { "name": "category", "value": "={{ $json.selected_topic.category }}" }
+          ]
+        },
+        "options": { "timeout": 120000 }
+      },
+      "id": "generate-script",
+      "name": "Generate Script + Quality Gate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.quality_score.approved }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "quality-check",
+      "name": "Quality Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8002/api/scenes",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "script", "value": "={{ $('Generate Script + Quality Gate').item.json.script }}" },
+            { "name": "title", "value": "={{ $('Research Topic').item.json.selected_topic?.topic || 'Untitled' }}" }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "scene-breakdown",
+      "name": "Scene Breakdown",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1130, 250]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8002/api/voice",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ scenes: $json.scenes, projectId: ($json.title || 'project').replace(/[^a-z0-9]/gi, '_').toLowerCase().slice(0,30) }) }}",
+        "options": { "timeout": 300000 }
+      },
+      "id": "generate-voice",
+      "name": "Generate Voice",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1350, 250]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8002/api/render",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ scenes: $('Scene Breakdown').item.json.scenes, projectId: $json.projectId, audioTimings: $json.scenes }) }}",
+        "options": { "timeout": 600000 }
+      },
+      "id": "render-video",
+      "name": "Render Animation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1570, 250]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8002/api/assemble",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "projectId", "value": "={{ $('Generate Voice').item.json.projectId }}" },
+            { "name": "useNvenc", "value": "true" }
+          ]
+        },
+        "options": { "timeout": 300000 }
+      },
+      "id": "assemble-video",
+      "name": "Assemble Final Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1790, 250]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8002/api/thumbnail",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "title", "value": "={{ $('Research Topic').item.json.selected_topic?.topic || $('Scene Breakdown').item.json.title || 'Untitled' }}" },
+            { "name": "projectId", "value": "={{ $('Generate Voice').item.json.projectId }}" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "generate-thumbnail",
+      "name": "Generate Thumbnail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2010, 250]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8002/api/upload",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "projectId", "value": "={{ $('Generate Voice').item.json.projectId }}" },
+            { "name": "title", "value": "={{ $('Research Topic').item.json.selected_topic?.topic || $('Scene Breakdown').item.json.title || 'Untitled' }}" }
+          ]
+        },
+        "options": { "timeout": 300000 }
+      },
+      "id": "upload-youtube",
+      "name": "Upload to YouTube",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2230, 250]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "skipped - quality too low" }
+          ]
+        }
+      },
+      "id": "skip-topic",
+      "name": "Skip Topic",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1130, 450]
+    }
+  ],
+  "connections": {
+    "Daily 6AM Trigger": {
+      "main": [[{ "node": "Research Topic", "type": "main", "index": 0 }]]
+    },
+    "Research Topic": {
+      "main": [[{ "node": "Generate Script + Quality Gate", "type": "main", "index": 0 }]]
+    },
+    "Generate Script + Quality Gate": {
+      "main": [[{ "node": "Quality Check", "type": "main", "index": 0 }]]
+    },
+    "Quality Check": {
+      "main": [
+        [{ "node": "Scene Breakdown", "type": "main", "index": 0 }],
+        [{ "node": "Skip Topic", "type": "main", "index": 0 }]
+      ]
+    },
+    "Scene Breakdown": {
+      "main": [[{ "node": "Generate Voice", "type": "main", "index": 0 }]]
+    },
+    "Generate Voice": {
+      "main": [[{ "node": "Render Animation", "type": "main", "index": 0 }]]
+    },
+    "Render Animation": {
+      "main": [[{ "node": "Assemble Final Video", "type": "main", "index": 0 }]]
+    },
+    "Assemble Final Video": {
+      "main": [[{ "node": "Generate Thumbnail", "type": "main", "index": 0 }]]
+    },
+    "Generate Thumbnail": {
+      "main": [[{ "node": "Upload to YouTube", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}
